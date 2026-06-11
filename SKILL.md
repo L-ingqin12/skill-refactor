@@ -1,25 +1,76 @@
 ---
 name: skill-refactor
-description: Refactor and reorganize user-created skills. Use when the user has multiple skills that may overlap, wants to consolidate similar skills, clean up skill descriptions, extract shared patterns, or optimize skill triggering accuracy. Triggers on phrases like "refactor skills", "reorganize skills", "merge skills", "clean up skills", "skill 重构", "整理 skills".
+description: Refactor and reorganize user-created skills to eliminate routing ambiguity. When multiple skills overlap in trigger conditions, agents pick the wrong one and waste time going down incorrect paths. This skill analyzes overlap, establishes clear decision boundaries between similar skills, and rewrites descriptions so each skill has a unique, unambiguous trigger signature. Use when the user has accumulated skills that confuse the agent, wants to prevent wrong-skill routing, or says things like "skills are conflicting", "agent picked the wrong skill", "skill 路由错误".
 ---
 
 # Skill Refactor
 
-对用户已有的 skills/commands 进行重构整理——识别功能重叠、提取共享模式、合并相似 skill、拆分过于复杂的 skill，使每个 skill 职责单一、触发精准、结构清晰。
+**三重目标**:
 
-## 核心思想
+| 目标 | 含义 | 衡量标准 |
+|------|------|---------|
+| 🎯 **精准路由** | 相似 skill 之间建立互斥的决策边界，agent 一次命中正确 skill | 歧义评分 < 20%，正样本触发率 ≥ 90% |
+| 📐 **精简完备** | 每个 skill 职责单一、结构最小、覆盖完整，无冗余无遗漏 | 无 God Skill（≤5 step），无重复指令，无死代码 |
+| 🔒 **功能保持** | 重构前后功能完全一致，所有原场景 100% 覆盖，零行为偏差 | 原 skill 的所有 functional_steps 在新结构中可追溯 |
 
-Skill 重构的思维模型与代码重构完全一致：
+**三者关系**: 精准路由和精简完备是优化目标，功能保持是**硬约束**——任何重构操作不能以丢失功能为代价。如果无法在保持功能的前提下消除歧义，宁可保留冗余。
 
-| 代码重构 | Skill 重构 |
-|----------|-----------|
-| 重复代码 | 多个 skill 描述相同的触发条件，或执行相同步骤 |
-| God Class | 一个 skill 做 3+ 件不相关的事 |
-| 提取方法 | 将重复子流程提取到 `scripts/` 或 `references/` |
-| 重命名 | 修正模糊的 name/description |
-| 删除死代码 | 移除不再使用的 skill |
-| 单一职责 | 每个 skill 只做一件事，做好一件事 |
-| 接口隔离 | 精确的 description 让 agent 在正确的时机触发 |
+## 问题模型
+
+```
+用户请求: "review 一下我的代码改动"
+                │
+                ▼
+    ┌───────────────────────┐
+    │   Agent 看到 3 个     │
+    │   相似的 skill:        │
+    │                       │
+    │   code-review         │ ← 检查 bugs + compliance
+    │   security-review     │ ← 只做安全检查
+    │   pr-review-toolkit   │ ← 多个 agent 并行 review
+    │                       │
+    │   触发词都含 "review" │
+    │   结构都是审查代码     │
+    │   → 选哪个？          │
+    └───────────────────────┘
+                │
+         ┌──────┴──────┐
+         ▼              ▼
+    选对了 ✅        选错了 ❌
+                    agent 走上错误路径
+                    浪费 token + 时间
+                    用户得到错误结果
+```
+
+**根本原因**: 多个 skill 的 `description` 存在歧义交集——agent 无法从 description 区分它们。
+
+**解决方案**: 为每个 skill 建立**决策边界** (Decision Boundary)——不仅是「我做什么」，更重要的是「我和相邻 skill 的区别是什么」。
+
+## 核心概念：决策边界 (Decision Boundary)
+
+```
+Skill A                Skill B
+  │                      │
+  │   ┌──────────────┐   │
+  │   │  歧义区域     │   │   ← 需要消除
+  │   │  (两个 skill  │   │
+  │   │   都能触发)    │   │
+  │   └──────────────┘   │
+  │                      │
+  ◄────── 边界线 ────────►
+  
+边界线 = 明确的区分条件，agent 可以据此决策
+```
+
+**好的决策边界**:
+- 互斥条件：skill A 用于场景 X，skill B 用于场景 Y，X 和 Y 不重叠
+- 信号明确：agent 只需看用户请求中的 1-2 个特征词即可判定
+- 边界清晰：不存在「两个都行」的灰色地带
+
+**坏的决策边界**:
+- 两个 skill 的 description 都用「review code」作为触发词
+- 依赖 agent 读取 skill body 才能区分（太晚了，已经触发）
+- 用模糊的程度副词区分（「深度 review」 vs 「浅度 review」）
 
 ## 重构流程
 
@@ -36,200 +87,350 @@ Skill 重构的思维模型与代码重构完全一致：
 └── ~/.claude/plugins/cache/*/        # 已安装插件 commands
 ```
 
-**执行方式**:
+### Phase 2: 解析 & 诊断 — Parse & Diagnose
+
+运行自动分析：
+
 ```bash
-find ~/.claude/commands ~/.claude/skills -name "*.md" 2>/dev/null
-find .claude/commands .claude/skills -name "*.md" 2>/dev/null
+python3 scripts/analyze_skills.py
 ```
 
-对每个 skill 文件，读取完整内容并提取结构化信息。
+重点关注两个新增维度的诊断：
 
-### Phase 2: 解析 — Parse
+#### 2.1 歧义评分 (Ambiguity Score)
+对每对 skill，计算「agent 选错的概率」：
 
-对每个 skill 提取以下维度的结构化信息。写入分析临时文件以避免重复读取：
+| 维度 | 权重 | 含义 |
+|------|------|------|
+| Trigger Word Overlap | 40% | description 中的关键词重叠率 |
+| Domain Overlap | 30% | 是否属于同一领域（都用 git、都做 review、都处理文件） |
+| Structural Similarity | 30% | 指令结构、工具链、输出格式的相似度 |
 
-```
-分析维度 per skill:
-├── name:           skill 标识符
-├── description:    触发条件描述（最关键字段）
-├── allowed-tools:  需要的工具权限
-├── trigger_keywords: 从 description 中提取的关键触发词
-├── functional_steps: 实际执行的步骤列表（用 2-3 句话概括）
-├── inputs:         需要什么输入（文件、参数、git 状态等）
-├── outputs:        产出什么（文件修改、PR、报告等）
-├── dependencies:   依赖的 MCP、脚本、外部工具
-├── complexity:     simple(单步) | moderate(2-4步) | complex(5+步或多 agent)
-└── file_path:      文件位置
-```
+**Ambiguity Score > 50% → 高歧义风险，agent 可能选错。**
 
-**分析脚本**: 运行 `python scripts/analyze_skills.py <skill目录列表>` 自动提取以上信息，输出 JSON。
+#### 2.2 诊断分类
 
-### Phase 3: 聚类 — Cluster
-
-按以下维度对 skills 进行两两比较，计算重叠度：
-
-#### 3.1 触发重叠 (Trigger Overlap)
-比较两个 skill 的 `description` 字段。以下情况视为高度重叠：
-- 关键词交集 > 60%（如 "commit" + "git" + "push"）
-- 用户说出同一句话时，两个 skill 都可能被触发
-- 一个 description 的场景描述包含另一个
-
-#### 3.2 功能重叠 (Functional Overlap)
-比较 `functional_steps`：
-- 执行相同或高度相似的操作序列（如都做 commit→push→PR）
-- 使用相同的工具组合
-- 产出的输出类型相同
-
-#### 3.3 互补关系 (Complementary)
-- Skill A 的输出是 Skill B 的输入
-- 两个 skill 在同一工作流的不同阶段被调用
-- 用户经常连续调用它们
-
-#### 3.4 分类判断
-
-对每对 skill，归入以下类别之一：
+根据分析结果，将每对 skill 的关系标记为：
 
 ```
-重叠度 ≥ 70% → MERGE（合并为一个）
-重叠度 40-70% → EXTRACT（提取共享部分到 scripts/references）
-互补关系明确 → CHAIN（添加交叉引用，保留为独立 skill）
-重叠度 < 40% → KEEP（各自独立）
-复杂度 complex 且有多类功能 → SPLIT（按功能拆分为多个 skill）
-trigger_keywords 与行为不符 → RENAME（修正 name/description）
+Ambiguity ≥ 70%:  🔴 CONFLICT  — 两个 skill 几乎无法区分，必须合并或用条件拆分
+Ambiguity 40-70%: 🟡 AMBIGUOUS — 有重叠但可建立边界，需重写 description 添加互斥条件
+Ambiguity 20-40%: 🟢 NEAR      — 相邻但不冲突，需添加区分提示
+Ambiguity < 20%:  ✅ DISTINCT  — 互不干扰
 ```
 
-### Phase 4: 规划 — Plan
+### Phase 3: 建立决策边界 — Establish Boundaries
 
-生成重构计划，按优先级排序：
+这是核心步骤。对每个 🔴 CONFLICT 和 🟡 AMBIGUOUS 对，建立明确的边界：
 
-```markdown
-# Skill Refactoring Plan
+#### 方法 1: 互斥条件拆分
 
-## 🔴 Critical — Merge (消除重复)
-1. **`skill-a` + `skill-b` → `new-skill`**
-   - 原因: 触发条件重叠 85%，功能步骤重叠 80%
-   - 方案: 合并为一个 skill，用参数区分变体
+```
+Before (歧义):
+  skill-A: description: "Code review for pull requests"
+  skill-B: description: "Security review for code changes"
+  → agent 看到 "review the PR" 时两个都可能触发
 
-## 🟡 Important — Extract/Split
-2. **从 `skill-c`, `skill-d`, `skill-e` 提取共享脚本**
-   - 原因: 三个 skill 都执行"生成 commit message"这个子步骤
-   - 方案: 提取到 `scripts/generate_commit_msg.py`
-
-## 🟢 Nice-to-have — Rename/Chain
-3. **`skill-f` 改名**
-   - 原因: description 写的是"审查代码"但实际只做安全检查
-   - 方案: 修正为 security-review，精确描述触发条件
+After (互斥):
+  skill-A: description: >
+    General code review for bugs and CLAUDE.md compliance.
+    Use for: "review this PR", "code review", "check my changes".
+    Do NOT use for: security-only assessments — use security-review for that.
+  skill-B: description: >
+    Security-focused review: injection risks, auth bypass, data leaks.
+    Use for: "security review", "check for vulnerabilities", "is this safe".
+    Do NOT use for: general bug review or CLAUDE.md checks — use code-review for that.
+  → agent 看到 "check for SQL injection" 明确触发 security-review
+  → agent 看到 "review my PR for bugs" 明确触发 code-review
 ```
 
-在继续之前，**必须将重构计划呈现给用户确认**。这是破坏性操作——合并后原 skill 会被修改或删除。
+**关键技巧**: description 中加入 **NOT 子句**——明确告诉 agent 什么情况下不要触发自己。
+
+#### 方法 2: 粒度分层
+
+```
+Before (歧义):
+  skill-A: "Run tests"
+  skill-B: "Run full CI pipeline"
+
+After (分层):
+  skill-A: "Run unit tests quickly (single command, <30s)"
+  skill-B: "Run full CI pipeline (build + test + lint + deploy check, ~10min)"
+  → agent 根据用户对速度/范围的期望选择
+```
+
+#### 方法 3: 场景锚定
+
+```
+Before (歧义):
+  skill-A: "Create a git commit"
+  skill-B: "Commit and create PR"
+
+After (场景锚定):
+  skill-A: "Create a git commit during active development. Use when you're mid-work and want to checkpoint."
+  skill-B: "Complete workflow: commit + push + open PR. Use when work is done and ready for review."
+  → agent 根据用户所处阶段选择
+```
+
+#### 方法 4: 合并消除
+
+如果两个 skill 的决策边界无法建立（本质上做的是同一件事），合并为最精确的一个：
+
+```
+Before: 三个 commit 相关 skill
+  commit-commands:commit
+  commit-commands:commit-push-pr
+  commit-commands:clean_gone
+
+问题: commit 和 commit-push-pr 的边界模糊
+
+After:
+  commit-commands:commit          # 统一入口，自动检测阶段
+                                   # 只有暂存区有改动 → commit
+                                   # commit 已在 feature branch → commit + push + PR
+  commit-commands:clean_gone      # 保持独立（操作完全不同）
+```
+
+### Phase 4: 路由验证 — Route Test
+
+建立边界后，**必须**用一组测试 query 验证 agent 的正确路由率：
+
+```
+测试集（至少 10 条 query）:
+├── 正样本: 应该触发 skill A 的 query（5 条）
+├── 正样本: 应该触发 skill B 的 query（5 条）
+├── 边界样本: 同时含 A 和 B 关键词的 query（3 条）
+└── 负样本: 不应触发任何 skill 的 query（2 条）
+
+通过标准:
+  ✅ 正样本正确触发率 ≥ 90%
+  ✅ 边界样本: 如果 query 真的模糊，agent 应询问用户而非随意选择
+  ✅ 负样本: 不触发
+```
+
+**验证方式**: 对每条 query，人工判断「agent 看到这些 description 时，会选哪个 skill？」。不需要真正运行，只需基于 description 做路由判断。
 
 ### Phase 5: 执行 — Execute
 
-用户确认后，逐个执行重构操作：
+用户确认边界方案后，修改 skill 文件。**每个操作必须遵循功能保持约束**。
 
-#### MERGE 操作
+#### 功能保持约束 (Hard Constraint)
+
+在执行任何重构操作前，必须先提取「功能指纹」：
+
 ```
-输入: skill_a.md, skill_b.md（两个待合并的 skill）
-输出: skill_merged.md（合并后的 skill）
-
-步骤:
-1. 分析两个 skill 的共同点和差异点
-2. 共同部分 → 作为主干
-3. 差异部分 → 用清晰的参数或条件分支区分
-4. 重写 description，覆盖两个原 skill 的所有触发场景
-5. 如果合适，提取共享子流程到 scripts/
-6. 备份原文件 → 写新文件 → 删除原文件（或标记 deprecated）
+功能指纹 = 原 skill 的完整功能清单:
+├── 每个 functional_step 及其输入/输出
+├── 每个工具调用的目的和参数范围
+├── 每个边界情况的处理方式
+└── 与其他 skill 的交互点（被调用、调用别人）
 ```
 
-#### EXTRACT 操作
+**合并操作的功能保持检查**:
 ```
-输入: 多个有共享子步骤的 skill
-输出: scripts/shared_xxx.py 或 references/shared_xxx.md
+Before: skill-a (3 steps) + skill-b (4 steps)
+After:  skill-merged
 
-步骤:
-1. 精确定位重复的步骤/指令段落
-2. 评估：适合脚本化（确定性逻辑）还是适合 reference（知识/指导）
-3. 写出共享资源
-4. 修改各 skill，改为引用共享资源而非内联重复内容
-```
-
-#### SPLIT 操作
-```
-输入: 一个过于复杂的 skill
-输出: 2-3 个单一职责的 skill
-
-步骤:
-1. 识别 skill 中的独立功能边界
-2. 为每个独立功能写新的 skill 文件
-3. 每个新 skill 有精确的 description
-4. 如果它们之间有顺序依赖，添加交叉引用
+检查项:
+□ skill-a 的每个 step 在 skill-merged 中可找到对应 → 逐条 trace
+□ skill-b 的每个 step 在 skill-merged 中可找到对应 → 逐条 trace
+□ skill-a 的每个触发场景在 skill-merged 的 description 中有覆盖
+□ skill-b 的每个触发场景在 skill-merged 的 description 中有覆盖
+□ 共同的步骤只出现一次（不重复）
+□ 差异步骤用条件清晰区分（不模糊）
 ```
 
-#### RENAME 操作
+**拆分操作的功能保持检查**:
 ```
-输入: 一个 description 不准确的 skill
-输出: 修正后的 skill
+Before: skill-god (8 steps)
+After:  skill-x (3 steps) + skill-y (3 steps) + skill-z (2 steps)
 
-步骤:
-1. 读取 skill 实际指令内容
-2. 提取真正的功能和触发条件
-3. 重写 description，遵循"pushy"原则（稍微主动触发）
-4. 更新 name（如有必要）
+检查项:
+□ 原 8 steps 全部分配到新 skill 中（无遗漏）
+□ 每个新 skill 的 description 覆盖了分配给它的场景
+□ 如果原 skill 中有步骤顺序依赖，新 skill 间有交叉引用
+□ 用户可以独立调用每个新 skill（不需要知道内部拆分细节）
 ```
 
-### Phase 6: 验证 — Verify
+**提取操作的功能保持检查**:
+```
+Before: skill-a (inline 重复步骤 S)
+After:  skill-a (引用 scripts/shared_s.py)
 
-重构完成后，对每个修改过的 skill 做快速检查：
+检查项:
+□ 脚本的行为与原内联步骤完全一致（参数、输出、错误处理）
+□ Skill body 中的引用方式清晰且包含回退说明
+```
 
-1. **触发测试**: 用 2-3 个典型用户 query 在脑中模拟——这个 skill 会被正确触发吗？会被错误触发吗？
-2. **功能完整性**: 原 skill 的所有功能场景在新结构中是否都有覆盖？
-3. **无遗漏**: 检查是否有任何原 skill 的功能在新结构中被遗漏
+#### 执行步骤
 
-将验证结果呈现给用户。
+1. **提取功能指纹** → 记录到 `.claude/skills/skill-refactor/fingerprints/<skill-name>.json`
+2. **备份原文件** → `.claude/backups/<skill-name>.<timestamp>.md`
+3. **执行变换** → 重写 description + body
+4. **功能 trace** → 对着指纹逐条验证，确认无遗漏
+5. **更新其他 skill 的交叉引用** → 如果 skill 名字变了，更新所有引用它的 skill
+
+### Phase 6: 验证 — Verify (三层检查)
+
+重构完成后，执行三层验证：
+
+#### Layer 1: 功能等价性 (Must Pass)
+对着 Phase 5 提取的功能指纹，逐条 trace：
+```
+原件: skill-a, step 2: "运行 git diff 检查改动"
+新件: skill-merged, step 3: "运行 git diff --staged 检查暂存区改动"
+→ ⚠️ 差异: 原检查所有改动，新只检查暂存区 → 功能偏差！需修正。
+```
+
+**通过标准**: 100% trace 通过，0 偏差。
+
+#### Layer 2: 路由精准性 (Should Pass)
+用 10+ 条测试 query 验证：
+- 每条 query 应触发且仅触发正确的 skill
+- 不应出现「两个 skill 都合适」的灰色地带
+- 边界 query 应触发 agent 询问用户而非随意选择
+
+**通过标准**: 正样本命中率 ≥ 90%，无误触发。
+
+#### Layer 3: 精简完备性 (Nice to Pass)
+- 每个 skill body ≤ 500 行
+- 无重复段落（跨 skill 比较）
+- 每个 skill 职责单一（可用一句话描述它做什么）
+
+#### 验证失败回滚
+如果 Layer 1 验证失败 → 回滚到备份，调整方案后重试。
+如果 Layer 2 验证失败 → 调整 description，重新做路由测试。
+如果 Layer 3 验证失败 → 提取/拆分，但必须重新过 Layer 1。
+
+### Phase 7: 输出路由地图 — Routing Map
+
+重构完成后，生成一份**路由地图**供用户确认：
+
+```markdown
+# Skill Routing Map
+
+## 当用户说 "review" 时:
+| 用户实际意图 | 正确 Skill | 识别信号 |
+|-------------|-----------|---------|
+| 检查 bugs + 规范 | code-review | "review PR", "check bugs", "code review" |
+| 只做安全检查 | security-review | "security", "vulnerability", "safe", "injection" |
+| 全面多维度审查 | pr-review-toolkit | "comprehensive", "full review", "all aspects" |
+
+## 当用户说 "commit" 时:
+| 用户实际意图 | 正确 Skill | 识别信号 |
+|-------------|-----------|---------|
+| 开发中存档 | commit | 只有暂存改动，没说 PR |
+| 完成工作提交 | commit-push-pr | "create PR", "push", "open a PR" |
+| 清理本地分支 | clean_gone | "clean", "stale", "gone", "cleanup" |
+```
+
+---
+
+### Phase 8: 精简完备检查 — Lean & Complete
+
+精准路由解决且功能等价验证通过后，对每个 skill 做精简完备审查：
+
+#### 7.1 冗余检测
+```
+检查项:
+├── 两个 skill 有相同的 instruction 段落（>3 行相同）？ → 提取到 scripts/ 或 references/
+├── Skill body 中重复了 description 的内容？ → 删除 body 中的重复
+├── 多个 skill 定义了相同的输出模板？ → 提取到 references/templates/
+└── Skill body 超过 500 行？ → 拆分或把细节移到 references/
+```
+
+#### 7.2 完备性检测
+```
+检查项:
+├── 用户场景覆盖率: 这个 skill 覆盖了该领域的所有常见用户需求吗？
+├── 错误处理: 前置条件不满足时，skill 是否给出明确指引而非静默失败？
+├── 边界情况: 空输入、异常输入、权限不足等情况有处理说明吗？
+└── 交叉引用: 与其他 skill 的关系是否在 body 中明确（"如果需要 X，应该用 skill Y"）？
+```
+
+#### 7.3 复杂度阈值
+```
+复杂度      Step 数    处理方式
+simple      1-2        ✅ 保留，检查 description 是否足够精确
+moderate    3-5        ✅ 保留
+complex     6-8        ⚠️ 检查是否可以拆分
+complex     9+         🔴 必须拆分（除非是编排型 skill 如 code-review）
+```
+
+#### 7.4 死代码检测
+```
+标记为 DEPRECATED 的信号:
+├── 引用的脚本/工具已不存在
+├── 已在路由地图中被其他 skill 完全覆盖
+├── description 中包含 "deprecated"、"不再使用"、"replaced by"
+└── 用户反馈 "这个 skill 没用过"
+```
 
 ## 关键原则
 
-### 单一职责
+### 🎯 精准路由三原则
+
+**1. 决策边界优先**
+重构的第一目标不是「减少 skill 数量」，而是「让每个 skill 的触发条件互斥」。如果两个 skill 能建立清晰的决策边界，它们可以（也应该）独立存在。
+
+**2. Description 承载路由信息**
+- description 必须告诉 agent：**什么时候用我 + 什么时候不要用我**
+- 宁可用 NOT 子句多写 10 个字，不要让 agent 猜
+- 不要写「Help with X」——写「Use when user asks for X with Y context. Do NOT use for Z.」
+
+**3. 相似的 body 可以共存，相似的 description 不行**
+两个 skill 的内部步骤相似是可以的（比如都用 git 命令），但它们的 description 必须互斥。Agent 只看 description 做路由决策。
+
+### 📐 精简完备三原则
+
+**4. 单一职责**
 每个 skill 应该只做一件事。"做 git 提交 + 做 PR + 清理分支"应该是一个 skill 吗？可能不是——它们服务于不同的用户意图。
 
-**判断标准**: 如果用户在不同时间点、出于不同目的调用这些功能，它们应该是独立的 skill。如果它们总是一起使用（如 commit→push→PR），可以合并但用清晰的步骤指引。
+**判断标准**: 如果用户在不同时间点、出于不同目的调用这些功能，它们应该是独立的 skill。
 
-### Description 是 Skill 的接口
-description 是 agent 决定是否触发 skill 的唯一依据。重构时：
-- description 必须精确描述"用户什么情况下需要这个 skill"
-- 宁可稍微 pushy（过度触发由 agent 自行判断），不可太保守（skill 从不被触发）
-- 命名空间前缀（如 `commit-commands:commit`）应与功能一致
+**5. 保持 lean（最小完备）**
+- SKILL.md body < 500 行；接近上限时用 references/ 分层
+- 确定性操作 → `scripts/`（不占 body 篇幅）
+- 知识/模板 → `references/`（按需加载，不占用触发时的上下文）
+- 删除不 pull weight 的指令（每次都被 agent 跳过或从不执行的步骤）
 
-### 保持 lean
-- SKILL.md 正文 < 500 行
-- 超过 300 行的 reference 文件需要目录
-- 确定性操作 → 写成脚本放 `scripts/`
-- 知识/指导 → 写成 reference 放 `references/`
+**6. 场景完备**
+Lean ≠ incomplete。每个 skill 必须覆盖其领域内的所有常见场景：
+- 正常路径（happy path）✅
+- 前置条件不满足时的处理 ✅
+- 与其他 skill 的切换指引 ✅
 
-### 渐进式加载
-遵循 skill 系统的三级加载：
-1. **Metadata** (name + description) — 总是在 agent 上下文中
-2. **SKILL.md body** — skill 触发时加载
-3. **Bundled resources** — 按需加载
+### 综合原则
 
-重构时要确保 description 承载了足够的触发信息，body 不重复 description 内容。
+**7. 从「我能做什么」到「用户什么情况下需要我」**
+Bad description 描述的是 skill 自身的能力。Good description 描述的是用户的场景和意图。
+
+```
+❌ Bad:  "This skill creates git commits with auto-generated messages."
+✅ Good: "Create a git commit when the user has staged changes and wants to checkpoint.
+          Do NOT use for pushing or creating PRs — use commit-push-pr for that."
+```
+
+**8. 精准与精简互相成就**
+- 精准路由迫使 skill 职责清晰 → 自然精简
+- 精简的 skill 容易写出互斥的 description → 自然精准
+- 如果发现某个 skill 的 description 很难写得互斥 → 说明它职责不单一，该拆分了
 
 ## 常见重构模式
 
-详见 `references/refactoring_patterns.md`，包括：
-- 流水线合并 (Pipeline Merge)
-- 参数化变体 (Parameterized Variant)
-- 共享子程序提取 (Subroutine Extraction)
-- 分层拆分 (Layered Split)
-- 命名空间整理 (Namespace Cleanup)
+详见 `references/refactoring_patterns.md`，重点模式：
+
+- **互斥条件拆分** — 同一领域、不同 focus → NOT 子句
+- **粒度分层** — 同一操作、不同范围 → 时间/步骤数区分
+- **场景锚定** — 同一工具、不同阶段 → 用户意图区分
+- **合并消除** — 无法建立边界 → 合并为最精准版本
 
 ## 使用方法
 
 ```
-/skill-refactor                    # 扫描并分析所有 skill，输出分析报告和建议
-/skill-refactor --auto             # 自动执行低风险重构（rename, extract scripts）
+/skill-refactor                    # 扫描分析，输出歧义诊断 + 路由地图
 /skill-refactor --dry-run          # 只分析，不修改任何文件
-/skill-refactor --target <name>    # 只分析指定 skill 及其相关 skill
+/skill-refactor --target <name>    # 只分析与指定 skill 相关的歧义
 ```
 
-首次使用建议先 `--dry-run`，确认计划后再执行。
+首次使用建议先 `--dry-run`，确认诊断和路由地图后再执行。

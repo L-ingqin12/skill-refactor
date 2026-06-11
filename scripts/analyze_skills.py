@@ -125,50 +125,90 @@ def detect_tool_usage(content: str, frontmatter: dict) -> list[str]:
     return sorted(tools)
 
 
-def compute_overlap_score(skill_a: dict, skill_b: dict) -> dict:
-    """Compute overlap between two skills across multiple dimensions."""
-    # 1. Trigger keyword overlap
+def detect_domain(description: str, steps: list[str], tools: list[str]) -> str:
+    """Detect the functional domain a skill belongs to."""
+    domain_keywords = {
+        'git': ['git', 'commit', 'push', 'branch', 'pr', 'pull request', 'merge', 'rebase'],
+        'code_review': ['review', 'code review', 'bug', 'compliance', 'security review', 'inspection'],
+        'deploy': ['deploy', 'release', 'publish', 'ship', 'production', 'staging'],
+        'testing': ['test', 'unittest', 'pytest', 'coverage', 'assert', 'mock', 'e2e'],
+        'docker': ['docker', 'container', 'image', 'compose', 'kubernetes', 'k8s'],
+        'npm': ['npm', 'package', 'node', 'javascript', 'typescript', 'install'],
+        'file_ops': ['file', 'read', 'write', 'copy', 'move', 'delete', 'rename'],
+        'data': ['data', 'csv', 'json', 'parse', 'transform', 'extract'],
+        'docs': ['doc', 'readme', 'documentation', 'wiki', 'markdown', 'md'],
+        'search': ['search', 'find', 'grep', 'locate', 'query', 'lookup'],
+    }
+
+    text = (description + ' ' + ' '.join(steps) + ' ' + ' '.join(tools)).lower()
+    scores = {domain: sum(1 for kw in kws if kw in text) for domain, kws in domain_keywords.items()}
+    best = max(scores, key=lambda k: scores[k])
+    return best if scores[best] > 0 else 'general'
+
+
+def compute_ambiguity_score(skill_a: dict, skill_b: dict) -> dict:
+    """Compute ambiguity score between two skills — how likely agent picks wrong.
+
+    This is the core metric. High ambiguity = agent will confuse these two skills.
+    Weights tuned for routing accuracy: trigger words matter most (agent decides
+    from description), domain overlap second, structural similarity third.
+    """
+    # 1. Trigger Word Overlap (40%) — most important for routing
     kw_a = set(skill_a.get('trigger_keywords', []))
     kw_b = set(skill_b.get('trigger_keywords', []))
     union = kw_a | kw_b
     intersection = kw_a & kw_b
     trigger_overlap = len(intersection) / len(union) if union else 0
 
-    # 2. Tool overlap
+    # 2. Domain Overlap (30%) — same domain = higher confusion risk
+    domain_a = skill_a.get('domain', 'general')
+    domain_b = skill_b.get('domain', 'general')
+    domain_match = 1.0 if domain_a == domain_b else 0.0
+
+    # 3. Structural Similarity (30%) — similar tools + steps
     tools_a = set(skill_a.get('tools_used', []))
     tools_b = set(skill_b.get('tools_used', []))
     tool_union = tools_a | tools_b
     tool_intersection = tools_a & tools_b
-    tool_overlap = len(tool_intersection) / len(tool_union) if tool_union else 0
+    tool_sim = len(tool_intersection) / len(tool_union) if tool_union else 0
 
-    # 3. Step similarity (simple Jaccard on step tokens)
     steps_a = set(' '.join(skill_a.get('functional_steps', [])).lower().split())
     steps_b = set(' '.join(skill_b.get('functional_steps', [])).lower().split())
     step_union = steps_a | steps_b
     step_intersection = steps_a & steps_b
-    step_overlap = len(step_intersection) / len(step_union) if step_union else 0
+    step_sim = len(step_intersection) / len(step_union) if step_union else 0
 
-    # Weighted composite
-    composite = (trigger_overlap * 0.35 + tool_overlap * 0.25 + step_overlap * 0.40)
+    structural = (tool_sim + step_sim) / 2
+
+    # Weighted composite — routing ambiguity score
+    ambiguity = (trigger_overlap * 0.40 + domain_match * 0.30 + structural * 0.30)
 
     return {
         'trigger_overlap': round(trigger_overlap, 3),
-        'tool_overlap': round(tool_overlap, 3),
-        'step_overlap': round(step_overlap, 3),
-        'composite': round(composite, 3),
+        'domain_match': domain_match,
+        'domain_a': domain_a,
+        'domain_b': domain_b,
+        'structural_similarity': round(structural, 3),
+        'ambiguity_score': round(ambiguity, 3),
     }
 
 
-def classify_overlap(composite: float) -> str:
-    """Classify the relationship between two skills based on composite overlap score."""
-    if composite >= 0.7:
-        return "MERGE"
-    elif composite >= 0.4:
-        return "EXTRACT"
-    elif composite >= 0.2:
-        return "CHAIN"
+def classify_ambiguity(ambiguity: float) -> str:
+    """Classify the routing risk between two skills.
+
+    CONFLICT:  agent cannot distinguish — must merge or add NOT clauses
+    AMBIGUOUS: overlapping but boundary can be drawn
+    NEAR:      adjacent domains, low risk
+    DISTINCT:  clearly different, no action needed
+    """
+    if ambiguity >= 0.7:
+        return "CONFLICT"
+    elif ambiguity >= 0.4:
+        return "AMBIGUOUS"
+    elif ambiguity >= 0.2:
+        return "NEAR"
     else:
-        return "KEEP"
+        return "DISTINCT"
 
 
 def analyze_file(filepath: str) -> dict | None:
@@ -191,6 +231,7 @@ def analyze_file(filepath: str) -> dict | None:
     steps = extract_functional_steps(content)
     complexity = detect_complexity(content)
     tools = detect_tool_usage(content, fm)
+    domain = detect_domain(description, steps, tools)
 
     # Detect if this is a command (single file) or part of a skill directory
     is_command = os.path.basename(os.path.dirname(filepath)) == 'commands'
@@ -200,6 +241,7 @@ def analyze_file(filepath: str) -> dict | None:
         'file_path': filepath,
         'description': description,
         'type': 'command' if is_command else 'skill',
+        'domain': domain,
         'trigger_keywords': trigger_kw,
         'functional_steps': steps,
         'tools_used': tools,
@@ -231,25 +273,26 @@ def scan_directories(paths: list[str]) -> list[str]:
 
 
 def build_comparison_matrix(skills: list[dict]) -> list[dict]:
-    """Build pairwise comparison matrix for all skills."""
+    """Build pairwise comparison matrix for all skills — routing ambiguity focus."""
     comparisons = []
     for i in range(len(skills)):
         for j in range(i + 1, len(skills)):
             a, b = skills[i], skills[j]
             if a.get('error') or b.get('error'):
                 continue
-            overlap = compute_overlap_score(a, b)
-            classification = classify_overlap(overlap['composite'])
-            if classification != 'KEEP':  # Only report actionable pairs
-                comparisons.append({
-                    'skill_a': a['name'],
-                    'skill_b': b['name'],
-                    'file_a': a['file_path'],
-                    'file_b': b['file_path'],
-                    'overlap': overlap,
-                    'classification': classification,
-                })
-    return sorted(comparisons, key=lambda x: x['overlap']['composite'], reverse=True)
+            ambiguity = compute_ambiguity_score(a, b)
+            classification = classify_ambiguity(ambiguity['ambiguity_score'])
+            comparisons.append({
+                'skill_a': a['name'],
+                'skill_b': b['name'],
+                'domain_a': a.get('domain', ''),
+                'domain_b': b.get('domain', ''),
+                'file_a': a['file_path'],
+                'file_b': b['file_path'],
+                'ambiguity': ambiguity,
+                'classification': classification,
+            })
+    return sorted(comparisons, key=lambda x: x['ambiguity']['ambiguity_score'], reverse=True)
 
 
 def main():
@@ -288,11 +331,16 @@ def main():
         'complexity_distribution': dict(complexity_dist),
         'comparisons': comparisons,
         'actionable_pairs': len(comparisons),
-        'summary': {
-            'merge_candidates': len([c for c in comparisons if c['classification'] == 'MERGE']),
-            'extract_candidates': len([c for c in comparisons if c['classification'] == 'EXTRACT']),
-            'chain_candidates': len([c for c in comparisons if c['classification'] == 'CHAIN']),
-        }
+        'ambiguity_summary': {
+            'conflict': len([c for c in comparisons if c['classification'] == 'CONFLICT']),
+            'ambiguous': len([c for c in comparisons if c['classification'] == 'AMBIGUOUS']),
+            'near': len([c for c in comparisons if c['classification'] == 'NEAR']),
+            'distinct': len([c for c in comparisons if c['classification'] == 'DISTINCT']),
+        },
+        'complexity_flags': [
+            {'name': s['name'], 'complexity': s['complexity'], 'lines': s['content_length_lines']}
+            for s in skills if s['complexity'] == 'complex' or s['content_length_lines'] > 300
+        ]
     }
 
     print(json.dumps(output, indent=2, ensure_ascii=False))
