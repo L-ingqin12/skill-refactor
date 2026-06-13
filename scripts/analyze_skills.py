@@ -47,7 +47,7 @@ def extract_trigger_keywords(description: str) -> list[str]:
         'this', 'that', 'these', 'those', 'it', 'its', 'use', 'using',
         'used', 'user', 'users', 'want', 'wants', 'need', 'needs',
         'skill', 'skills', 'make', 'sure', 'also', 'just', 'like',
-        'the', 'how', 'what', 'where', 'which', 'who', 'whom', 'why',
+        'how', 'what', 'where', 'which', 'who', 'whom', 'why',
     }
 
     words = text.split()
@@ -59,12 +59,13 @@ def extract_functional_steps(content: str) -> list[str]:
     """Extract a high-level summary of what the skill does by examining its structure."""
     steps = []
 
-    # Look for numbered lists, bullet points with action verbs
+    # Look for numbered lists, bullet points, section headers
     action_patterns = [
-        r'^\d+\.\s\*\*(.*?)\*\*',         # 1. **Step title**
-        r'^\d+\.\s+(Analyze|Create|Run|Execute|Check|Review|Commit|Push|Open|Generate|Read|Write|Test|Build|Deploy|Install|Configure|Start|Stop|Fetch|Scan|Search|Find|Extract|Compare|Merge|Split|Validate|Verify|Clean|Remove|Delete|Update|Add|Set|Get|List|Show)',  # 1. Action verb
-        r'^###\s+(.*)',                     # ### Subsection titles
-        r'^\*\*(.*?)\*\*',                  # **Bold headers**
+        r'^\d+\.\s\*\*(.*?)\*\*',                            # 1. **Step title**
+        r'^\d+\.\s+(Analyze|Create|Run|Execute|Check|Review|Commit|Push|Open|Generate|Read|Write|Test|Build|Deploy|Install|Configure|Start|Stop|Fetch|Scan|Search|Find|Extract|Compare|Merge|Split|Validate|Verify|Clean|Remove|Delete|Update|Add|Set|Get|List|Show|Discover|Parse|Diagnose|Establish|Output|Refactor)',  # 1. Action verb (EN)
+        r'^###\s+Phase\s+\d+.*?[—\-:]\s*(.*)',           # ### Phase X: ... — Title (EN/CN)
+        r'^###\s+(?!Phase)(.*)',                              # ### Non-phase section titles
+        r'^\*\*(.+?)\*\*',                                    # **Bold headers**
     ]
 
     for line in content.split('\n'):
@@ -161,9 +162,27 @@ def compute_ambiguity_score(skill_a: dict, skill_b: dict) -> dict:
     trigger_overlap = len(intersection) / len(union) if union else 0
 
     # 2. Domain Overlap (30%) — same domain = higher confusion risk
-    domain_a = skill_a.get('domain', 'general')
-    domain_b = skill_b.get('domain', 'general')
-    domain_match = 1.0 if domain_a == domain_b else 0.0
+    # Use keyword-level Jaccard rather than binary label match, because
+    # skills can overlap in domain even if their best-match label differs.
+    domain_keywords = {
+        'git': ['git', 'commit', 'push', 'branch', 'pr', 'pull request', 'merge', 'rebase'],
+        'code_review': ['review', 'code review', 'bug', 'compliance', 'inspection'],
+        'deploy': ['deploy', 'release', 'publish', 'ship', 'production', 'staging'],
+        'testing': ['test', 'unittest', 'pytest', 'coverage', 'assert', 'mock', 'e2e'],
+        'docker': ['docker', 'container', 'image', 'compose', 'kubernetes', 'k8s'],
+        'npm': ['npm', 'package', 'node', 'javascript', 'typescript', 'install'],
+        'file_ops': ['file', 'read', 'write', 'copy', 'move', 'delete', 'rename'],
+        'data': ['data', 'csv', 'json', 'parse', 'transform', 'extract'],
+        'docs': ['doc', 'readme', 'documentation', 'wiki', 'markdown', 'md'],
+        'search': ['search', 'find', 'grep', 'locate', 'query', 'lookup'],
+    }
+    text_a = (skill_a.get('description', '') + ' ' + ' '.join(skill_a.get('functional_steps', []))).lower()
+    text_b = (skill_b.get('description', '') + ' ' + ' '.join(skill_b.get('functional_steps', []))).lower()
+    kw_a = set(kw for _domain, kws in domain_keywords.items() for kw in kws if kw in text_a)
+    kw_b = set(kw for _domain, kws in domain_keywords.items() for kw in kws if kw in text_b)
+    domain_union = kw_a | kw_b
+    domain_intersection = kw_a & kw_b
+    domain_match = len(domain_intersection) / len(domain_union) if domain_union else 0.0
 
     # 3. Structural Similarity (30%) — similar tools + steps
     tools_a = set(skill_a.get('tools_used', []))
@@ -185,9 +204,7 @@ def compute_ambiguity_score(skill_a: dict, skill_b: dict) -> dict:
 
     return {
         'trigger_overlap': round(trigger_overlap, 3),
-        'domain_match': domain_match,
-        'domain_a': domain_a,
-        'domain_b': domain_b,
+        'domain_overlap': round(domain_match, 3),
         'structural_similarity': round(structural, 3),
         'ambiguity_score': round(ambiguity, 3),
     }

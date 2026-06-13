@@ -2,45 +2,55 @@
 description: Eliminate routing ambiguity between similar skills. When multiple skills overlap in trigger conditions, agents pick the wrong one — this skill analyzes overlap, establishes decision boundaries, and rewrites descriptions so each skill has a unique, unambiguous trigger signature. Use when skills confuse the agent or the user says "the agent picked the wrong skill".
 ---
 
-# Skill Refactor — Eliminate Routing Ambiguity
+# Skill Refactor
 
-Your task is to analyze the user's skills and eliminate routing conflicts so agents always pick the right skill.
-
-## Core Problem
-
-When multiple skills share trigger keywords, the agent cannot distinguish them from descriptions alone — it picks wrong, wastes tokens going down an incorrect path.
+Your task: eliminate routing conflicts so agents always pick the right skill, while keeping each skill lean and functionally intact.
 
 ## Process
 
-### 1. Discover
+Read the full methodology first:
+```
+Read ~/.claude/skills/skill-refactor/SKILL.md
+```
+
+### Phase 1: Discover
 ```bash
 find ~/.claude/commands ~/.claude/skills -name "*.md" 2>/dev/null
 find .claude/commands .claude/skills -name "*.md" 2>/dev/null
 ```
 
-### 2. Diagnose
+### Phase 2: Diagnose
 ```bash
-python3 /root/.claude/skills/skill-refactor/scripts/analyze_skills.py
+python3 ~/.claude/skills/skill-refactor/scripts/analyze_skills.py
 ```
-Parse the JSON output. Focus on pairs with **Ambiguity Score ≥ 40%** — these are routing risks.
+Focus on pairs with **Ambiguity Score ≥ 40%**.
 
-### 3. Establish Decision Boundaries
-For each high-ambiguity pair, establish a mutually exclusive condition:
-- **Method 1: NOT clause** — add "Do NOT use for X" to each description
-- **Method 2: Scope layering** — differentiate by scope/speed (fast vs comprehensive)
-- **Method 3: Scene anchoring** — differentiate by user intent/phase (mid-work vs done)
-- **Method 4: Merge** — if boundary is impossible, merge into one precise skill
+### Phase 3: Establish Decision Boundaries
+For each high-ambiguity pair, establish mutually exclusive conditions:
+- NOT clause, scope layering, scene anchoring, or merge
 
-### 4. Route Test
-Mentally test with 10+ queries. Can agent pick correctly from description alone?
+### Phase 4: Route Test
+Mentally test 10+ queries. Can agent pick correctly from description alone?
 
-### 5. Execute
-Present the plan → get user confirmation → backup originals → rewrite descriptions.
+### Phase 5: Execute (with functionality preservation)
+1. Extract functionality fingerprint from original skills
+2. Backup originals to `~/.claude/backups/`
+3. Rewrite descriptions + body
+4. Trace every original step against the new version
+5. Update cross-references in other skills
 
-### 6. Output Routing Map
-Generate a decision table: "When user says X → use skill Y because signal Z."
+### Phase 6: Verify (3-layer check)
+- Layer 1 (Must): Functionality equivalence — 100% trace pass
+- Layer 2 (Should): Routing precision — ≥90% hit rate
+- Layer 3 (Nice): Lean completeness — no filler, no duplication
+
+### Phase 7: Output Routing Map
+Decision table: "When user says X → use skill Y because signal Z."
+
+### Phase 8: Lean & Complete Check
+Redundancy detection, completeness check, complexity threshold, ruthless cut, dead code removal.
 
 ## Reference
-- Full methodology: `/root/.claude/skills/skill-refactor/SKILL.md`
-- Patterns catalog: `/root/.claude/skills/skill-refactor/references/refactoring_patterns.md`
-- Analysis script: `/root/.claude/skills/skill-refactor/scripts/analyze_skills.py`
+- Methodology: `~/.claude/skills/skill-refactor/SKILL.md`
+- Patterns: `~/.claude/skills/skill-refactor/references/refactoring_patterns.md`
+- Analyzer: `~/.claude/skills/skill-refactor/scripts/analyze_skills.py`
