@@ -1,6 +1,6 @@
 ---
 name: skill-refactor
-description: Refactor and reorganize user-created skills to eliminate routing ambiguity. When multiple skills overlap in trigger conditions, agents pick the wrong one and waste time going down incorrect paths. This skill analyzes overlap, establishes clear decision boundaries between similar skills, and rewrites descriptions so each skill has a unique, unambiguous trigger signature. Use when the user has accumulated skills that confuse the agent, wants to prevent wrong-skill routing, or says things like "skills are conflicting", "agent picked the wrong skill", "skill 路由错误".
+description: Diagnose and fix routing conflicts between user-created skills. Use ONLY when the user explicitly asks to refactor, reorganize, merge, or audit their skills (e.g. "refactor my skills", "整理 skills", "merge duplicate skills", "why did the agent pick the wrong skill"). Do NOT self-trigger — if the user is not directly requesting skill reorganization, do not use this skill.
 ---
 
 # Skill Refactor
@@ -72,6 +72,11 @@ Skill A                Skill B
 - 依赖 agent 读取 skill body 才能区分（太晚了，已经触发）
 - 用模糊的程度副词区分（「深度 review」 vs 「浅度 review」）
 
+## ⚠️ 自排除规则
+
+- **不得重构自身**: 如果 analyzer 报告 `skill-refactor` 自身存在歧义，跳过它。本 skill 的双重注册（command + SKILL.md）是设计如此——command.md 是快速入口，SKILL.md 是完整方法论文档。
+- **不得递归触发**: 如果用户没有明确要求整理/重构/审计 skill，不要因为看到多个相似 skill 而主动触发本 skill。
+
 ## 重构流程
 
 ### Phase 1: 发现 — Discover
@@ -118,6 +123,15 @@ Ambiguity 40-70%: 🟡 AMBIGUOUS — 有重叠但可建立边界，需重写 des
 Ambiguity 20-40%: 🟢 NEAR      — 相邻但不冲突，需添加区分提示
 Ambiguity < 20%:  ✅ DISTINCT  — 互不干扰
 ```
+
+#### ⏸️ DEFAULT STOP POINT
+
+**Present the diagnosis to the user and STOP.** Summarize:
+- X CONFLICT pairs (must fix)
+- Y AMBIGUOUS pairs (should fix)
+- Z complex skills flagged
+
+Ask: "Proceed with refactoring, or is this enough?" Only continue to Phase 3 if the user explicitly asks.
 
 ### Phase 3: 建立决策边界 — Establish Boundaries
 
@@ -324,9 +338,13 @@ After:  skill-a (引用 scripts/shared_s.py)
 | 清理本地分支 | clean_gone | "clean", "stale", "gone", "cleanup" |
 ```
 
+#### ⏸️ STOP POINT
+
+Present the routing map to the user. Phase 8 (lean check) is optional — only run it if the user asks for a deeper cleanup or if the analysis flagged skills > 300 lines.
+
 ---
 
-### Phase 8: 精简完备检查 — Lean & Complete
+### Phase 8: 精简完备检查 — Lean & Complete (OPTIONAL)
 
 精准路由解决且功能等价验证通过后，对每个 skill 做精简完备审查：
 

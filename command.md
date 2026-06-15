@@ -1,56 +1,35 @@
 ---
-description: Eliminate routing ambiguity between similar skills. When multiple skills overlap in trigger conditions, agents pick the wrong one — this skill analyzes overlap, establishes decision boundaries, and rewrites descriptions so each skill has a unique, unambiguous trigger signature. Use when skills confuse the agent or the user says "the agent picked the wrong skill".
+description: Diagnose and fix routing conflicts between user-created skills. Use ONLY when the user explicitly asks to refactor, reorganize, merge, or audit their skills. Do NOT self-trigger — if the user is not directly requesting skill reorganization, do not use this skill.
 ---
 
-# Skill Refactor
+# Skill Refactor — Quick Diagnosis
 
-Your task: eliminate routing conflicts so agents always pick the right skill, while keeping each skill lean and functionally intact.
+**⚠️ GUARD: Only proceed if the user explicitly asked to audit/refactor/reorganize skills. If unsure, ask the user first. Do NOT trigger on general confusion about which skill to use.**
 
-## Process
+## Minimal Path (default — stop after Phase 2 unless user asks for more)
 
-Read the full methodology first:
-```
-Read ~/.claude/skills/skill-refactor/SKILL.md
-```
-
-### Phase 1: Discover
+### Step 1: Scan
 ```bash
 find ~/.claude/commands ~/.claude/skills -name "*.md" 2>/dev/null
-find .claude/commands .claude/skills -name "*.md" 2>/dev/null
 ```
 
-### Phase 2: Diagnose
+### Step 2: Run Analyzer
 ```bash
 python3 ~/.claude/skills/skill-refactor/scripts/analyze_skills.py
 ```
-Focus on pairs with **Ambiguity Score ≥ 40%**.
 
-### Phase 3: Establish Decision Boundaries
-For each high-ambiguity pair, establish mutually exclusive conditions:
-- NOT clause, scope layering, scene anchoring, or merge
+### Step 3: Report & STOP
+Parse the JSON. Present only the critical findings:
+- 🔴 CONFLICT pairs (ambiguity ≥ 70%)
+- 🟡 AMBIGUOUS pairs (40-70%)
+- Skills flagged as complex (≥6 steps) or >300 lines
 
-### Phase 4: Route Test
-Mentally test 10+ queries. Can agent pick correctly from description alone?
+**STOP HERE unless the user explicitly asks to proceed with refactoring.** Do NOT automatically continue to rewrite skills.
 
-### Phase 5: Execute (with functionality preservation)
-1. Extract functionality fingerprint from original skills
-2. Backup originals to `~/.claude/backups/`
-3. Rewrite descriptions + body
-4. Trace every original step against the new version
-5. Update cross-references in other skills
+## If user asks to proceed
 
-### Phase 6: Verify (3-layer check)
-- Layer 1 (Must): Functionality equivalence — 100% trace pass
-- Layer 2 (Should): Routing precision — ≥90% hit rate
-- Layer 3 (Nice): Lean completeness — no filler, no duplication
-
-### Phase 7: Output Routing Map
-Decision table: "When user says X → use skill Y because signal Z."
-
-### Phase 8: Lean & Complete Check
-Redundancy detection, completeness check, complexity threshold, ruthless cut, dead code removal.
+Read `~/.claude/skills/skill-refactor/SKILL.md` for the full methodology (decision boundaries, functionality fingerprints, route testing).
 
 ## Reference
-- Methodology: `~/.claude/skills/skill-refactor/SKILL.md`
+- Full methodology: `~/.claude/skills/skill-refactor/SKILL.md`
 - Patterns: `~/.claude/skills/skill-refactor/references/refactoring_patterns.md`
-- Analyzer: `~/.claude/skills/skill-refactor/scripts/analyze_skills.py`
