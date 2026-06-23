@@ -133,91 +133,92 @@ Ambiguity < 20%:  ✅ DISTINCT  — 互不干扰
 
 Ask: "Proceed with refactoring, or is this enough?" Only continue to Phase 3 if the user explicitly asks.
 
-### Phase 3: 建立决策边界 — Establish Boundaries
+### Phase 3: 执行重构操作 — Refactor (Not Patch)
 
-这是核心步骤。但**关键原则**：决策信息放在合适的位置，不是一味往 description 里塞。
-
-#### 上下文成本层级 (Context Cost Hierarchy)
+**核心原则：备份+指纹已就绪，安全网已经铺好。大胆重构，不要只贴条件。**
 
 ```
-Level 1: description (YAML frontmatter)
-  → 100% 时间在 context 中，每次对话都消耗 token
-  → 字数预算: ≤50 words
-  → 只放: 功能(what) + 触发时机(when)
+❌ 保守做法 (当前问题):
+  CONFLICT pair → 在两个 description 各加一句 NOT 子句 → 完事
+  结果: skill 数量没变，结构没变，只是多了条件判断，治标不治本
 
-Level 2: SKILL.md body
-  → 只在 skill 被触发时加载（~5% 的交互）
-  → 字数预算: ≤500 行
-  → 放: 执行指令 + 与其他 skill 的切换指引
-
-Level 3: references/
-  → 按需显式加载（<1% 的交互）
-  → 无字数限制
-  → 放: 详细模板、schema、完整路由地图
+✅ 正确做法 (真正重构):
+  CONFLICT pair → 合并为一个 skill (merge)
+  God skill     → 拆分为 2-3 个 (split)
+  重复子步骤   → 提取到 scripts/ (extract)
+  结果: skill 数量减少，职责清晰，description 自然互斥
 ```
 
-**核心规则: 永远不在 description 里放 NOT 子句、示例 query、或冗长的区分说明。这些属于 body 或 references。**
+**重构优先于贴条件。如果你发现自己在给 description 加 NOT 子句——停下来，先问：是不是该合并/拆分/提取了？**
 
-#### 解决歧义的优先级
-
-```
-1. 🔴 重构消除 (最佳)  → 合并/拆分 skill，从根源上消除歧义
-2. 🟡 差异化 description → 用 ≤50 words 写出互斥的简短描述
-3. 🟢 body 内互斥指引   → 在 skill body 开头加 "如果用户意图是 X → 切换 skill Y"
-4. ❌ (禁止) description 加 NOT 子句 → 浪费全局 context
-```
-
-#### 方法 1: 重构消除 (首选)
+#### 操作选择决策树
 
 ```
-Before (歧义):
-  skill-A: description: "Code review for pull requests"      (5 words)
-  skill-B: description: "Security review for code changes"   (6 words)
-  → agent 看到 "review the PR" 时两个都可能触发
+两个 skill CONFLICT (歧义 ≥70%)
+├── 如果本质做同一件事 → MERGE 合并
+├── 如果各有独立职责但 description 重叠 → 重写 description，用互斥特征词
+└── (禁止) 各自加 NOT 子句 ← 这不是重构
 
-After (重构 — 如果本质上差异够大就拆分更清晰):
-  skill-A: description: "Review PRs for bugs and CLAUDE.md compliance"  (9 words)
-  skill-B: description: "Security audit for injection, auth, and data leak risks" (11 words)
-  → 互斥关键词: bugs/compliance vs injection/auth/leak
-  → 都在 50 words 内，context 友好
+一个 skill 太复杂 (≥6 steps 或 >300 行)
+├── 如果有独立的子功能 → SPLIT 拆分
+└── 如果步骤有强顺序依赖 → 保持，但提取确定性逻辑到 scripts/
+
+多个 skill 有相同子步骤 (≥3 行重复)
+└── EXTRACT 提取到 scripts/ 或 references/
 ```
 
-#### 方法 2: 差异化 description (备选)
-
-如果无法重构，只在 description 中用**互斥的特征词**区分，不加 NOT 子句：
+#### MERGE 操作 (真合并，不是加壳)
 
 ```
-❌ 错误示范 (NOT 子句浪费 context):
-  description: "Create a git commit when the user has staged changes.
-                Do NOT use for pushing or creating PRs — use commit-push-pr for that."
+Before:
+  commit-commands:commit.md       → 40 行, 做了 git add + commit
+  commit-commands:commit-push-pr  → 80 行, 做了 git add + commit + push + gh pr create
+  → 前 40 行完全重复，用户困惑何时用哪个
 
-✅ 正确示范 (只写自己的特征):
-  description: "Create a git commit for checkpointing work in progress."  (10 words)
-  → "checkpointing" — agent 能区分这 vs "done and ready for PR"
+After (真正合并):
+  commit-commands:commit.md       → 60 行
+    1. 检测当前阶段 (有 commit 但没 push? 在 feature branch?)
+    2. 只在本地改动 → git add + commit
+    3. 已完成 commit + 在 feature branch → commit + push + gh pr create
+  commit-commands:commit-push-pr  → 删除 (或改为一行转发: 调用 commit --push)
 ```
 
-#### 方法 3: body 内互斥指引 (兜底)
-
-在 skill body 开头加简洁的切换指引——只在 skill 被触发时才会加载：
-
-```markdown
-# skill body 开头
-> **Routing note**: If the user asked for a full PR workflow (commit + push + open PR),
-> suggest switching to `commit-commands:commit-push-pr` instead.
-```
-
-这 3 行只在 skill 触发时消耗 token，而不是 100% 的交互。
-
-#### 方法 4: 合并消除 (最后手段)
-
-如果两个 skill 本质上做同一件事，合并：
+#### SPLIT 操作 (真拆分，不是加条件分支)
 
 ```
-Before: 三个 commit 相关 skill
+Before:
+  maintenance.md  → 200 行, 检查系统+清理缓存+更新依赖+运行测试+报告
+
+After (真正拆分):
+  system-check.md  → 检查系统状态 + 生成报告
+  cache-clean.md   → 清理缓存
+  dep-update.md    → 更新依赖 + 运行测试验证
+  maintenance.md   → 删除 (功能已被 3 个 skill 覆盖)
+```
+
+#### EXTRACT 操作 (真提取，不是复制粘贴)
+
+```
+Before:
+  skill-a.md: 内联了 20 行 "检查 git working tree 是否干净" 的逻辑
+  skill-b.md: 内联了同样的 20 行
+  skill-c.md: 内联了同样的 20 行
+
 After:
-  commit-commands:commit          # 统一入口，自动检测阶段
-  commit-commands:clean_gone      # 保持独立（操作完全不同）
+  scripts/preflight_git.py        ← 一个脚本, 35 行
+  skill-a.md: `python scripts/preflight_git.py --check-clean`  (1 行)
+  skill-b.md: 同上 (1 行)
+  skill-c.md: 同上 (1 行)
 ```
+
+#### 贴条件 (仅当重构真的不适用)
+
+只在以下情况才只改 description：
+- 两个 skill 职责确实独立，只是 description 用了相似措辞
+- 合并会引入比歧义更严重的问题 (如安全审查不应和代码审查合并)
+- 用户明确说 "不要合并，给它们加区分就行"
+
+**上下文成本层级保持不变 — description 仍然 ≤50 words。**
 
 ### Phase 4: 路由验证 — Route Test
 
@@ -240,11 +241,13 @@ After:
 
 ### Phase 5: 执行 — Execute
 
-用户确认边界方案后，修改 skill 文件。**每个操作必须遵循功能保持约束**。
+用户确认方案后，**立即执行真实的重构操作**（merge/split/extract），不是贴条件。
 
-#### 功能保持约束 (Hard Constraint)
+**安全网已就绪**: 备份 + 功能指纹 = 出错了随时回滚。这意味着你可以大胆重构——安全网就是用来兜底的。
 
-在执行任何重构操作前，必须先提取「功能指纹」：
+#### 功能保持约束 (Safety Net, Not Handcuffs)
+
+指纹的作用是**让你放心重构**，不是让你不敢动。重构前提取指纹，重构后 trace 验证——中间的变换你想怎么做就怎么做。
 
 ```
 功能指纹 = 原 skill 的完整功能清单:
@@ -565,7 +568,14 @@ Before: "Run unit tests quickly using pytest. Make sure to check all test files.
 After:  "Run unit tests with pytest and report results."  (9 words)
 ```
 
-**8. 精准与精简互相成就**
+**8. 重构优先于贴条件**
+安全网（备份+指纹）的存在就是为了让你敢做真正的重构。看到 CONFLICT 时：
+- ✅ 第一反应: 合并 / 拆分 / 提取
+- ❌ 最后手段: 加 NOT 子句
+
+如果你发现自己在 description 里写 "Do NOT use for..." —— 停下来，先看看是不是该合并了。
+
+**9. 精准与精简互相成就**
 - 精准路由迫使 skill 职责清晰 → 自然精简
 - 精简的 skill 容易写出互斥的 description → 自然精准
 - 如果发现某个 skill 的 description 很难写得互斥 → 说明它职责不单一，该拆分了
