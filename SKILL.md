@@ -290,6 +290,39 @@ After:  skill-a (引用 scripts/shared_s.py)
 □ Skill body 中的引用方式清晰且包含回退说明
 ```
 
+**Description 语义等价检查 (关键)**:
+
+Description 是 skill 的接口——改它就是改触发条件。重构前后必须覆盖**完全相同**的用户场景集合，不能收窄也不能放宽。
+
+```
+错误示例 (场景收窄 → 漏触发):
+  Before: "Review code for issues"           → 覆盖: bugs, security, style, 所有代码问题
+  After:  "Review PRs for bugs"              → 只覆盖: bugs。Security/Style 场景丢失 ❌
+
+错误示例 (场景放宽 → 误触发):
+  Before: "Security audit for injection risks" → 覆盖: 注入类安全问题
+  After:  "Review code for security"            → 覆盖: 所有安全问题, 边界模糊 ❌
+
+正确示例 (等价变换 → 精确但不丢场景):
+  Before: "Review code for issues and security problems"
+  After:  "Review code for bugs and security vulnerabilities"
+  → bugs + security 两个场景都保留了 ✅
+```
+
+**Description 等价性校验**:
+```
+1. 列出原 description 覆盖的所有场景 (枚举)
+2. 对每个场景，写一句典型的用户 query
+3. 用新 description 做路由测试：这句 query 还会触发这个 skill 吗？
+4. 反向测试：新 description 会引入新的误触发场景吗？
+   → 用 3 条不该触发的 query 测试
+
+通过标准:
+  ✅ 原场景 100% 保留（不漏）
+  ✅ 无新增误触发场景（不滥）
+  ✅ 新 description ≤50 words（不胖）
+```
+
 #### 执行步骤
 
 1. **提取功能指纹** → 记录到 `.claude/skills/skill-refactor/fingerprints/<skill-name>.json`
@@ -302,15 +335,30 @@ After:  skill-a (引用 scripts/shared_s.py)
 
 重构完成后，执行三层验证：
 
-#### Layer 1: 功能等价性 (Must Pass)
-对着 Phase 5 提取的功能指纹，逐条 trace：
+#### Layer 1: 功能等价性 (Must Pass — 不过即回滚)
+
+**1a. 步骤等价**: 对着 Phase 5 提取的功能指纹，逐条 trace：
 ```
 原件: skill-a, step 2: "运行 git diff 检查改动"
 新件: skill-merged, step 3: "运行 git diff --staged 检查暂存区改动"
 → ⚠️ 差异: 原检查所有改动，新只检查暂存区 → 功能偏差！需修正。
 ```
 
-**通过标准**: 100% trace 通过，0 偏差。
+**1b. Description 语义等价**: 重构前后的 description 覆盖完全相同的用户场景集合：
+```
+原件 description → 枚举所有触发场景 → N 条典型 query
+新件 description → 对 N 条 query 逐一验证:
+  □ query 1: 仍然触发 ✅
+  □ query 2: 仍然触发 ✅
+  □ query N: 仍然触发 ✅
+
+反向: 用 3 条不该触发的 query 测试新 description:
+  □ 不应触发 query A: 未触发 ✅
+  □ 不应触发 query B: 未触发 ✅
+  □ 不应触发 query C: 未触发 ✅
+```
+
+**通过标准**: 步骤 100% trace + description 0 漏触发 + 0 新增误触发。
 
 #### Layer 2: 路由精准性 (Should Pass)
 用 10+ 条测试 query 验证：
