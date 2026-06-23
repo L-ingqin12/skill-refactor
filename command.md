@@ -1,5 +1,5 @@
 ---
-description: Diagnose and fix routing conflicts between user-created skills. Use ONLY when the user explicitly asks to refactor, reorganize, merge, or audit their skills. Do NOT self-trigger — if the user is not directly requesting skill reorganization, do not use this skill.
+description: Diagnose and fix routing conflicts between user-created skills. Use only when user explicitly asks to refactor, reorganize, merge or audit skills.
 ---
 
 # Skill Refactor — Quick Diagnosis

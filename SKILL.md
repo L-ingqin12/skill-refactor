@@ -1,6 +1,6 @@
 ---
 name: skill-refactor
-description: Diagnose and fix routing conflicts between user-created skills. Use ONLY when the user explicitly asks to refactor, reorganize, merge, or audit their skills (e.g. "refactor my skills", "整理 skills", "merge duplicate skills", "why did the agent pick the wrong skill"). Do NOT self-trigger — if the user is not directly requesting skill reorganization, do not use this skill.
+description: Diagnose and fix routing conflicts between user-created skills. Use only when user explicitly asks to refactor, reorganize, merge or audit skills.
 ---
 
 # Skill Refactor
@@ -135,73 +135,87 @@ Ask: "Proceed with refactoring, or is this enough?" Only continue to Phase 3 if 
 
 ### Phase 3: 建立决策边界 — Establish Boundaries
 
-这是核心步骤。对每个 🔴 CONFLICT 和 🟡 AMBIGUOUS 对，建立明确的边界：
+这是核心步骤。但**关键原则**：决策信息放在合适的位置，不是一味往 description 里塞。
 
-#### 方法 1: 互斥条件拆分
+#### 上下文成本层级 (Context Cost Hierarchy)
+
+```
+Level 1: description (YAML frontmatter)
+  → 100% 时间在 context 中，每次对话都消耗 token
+  → 字数预算: ≤50 words
+  → 只放: 功能(what) + 触发时机(when)
+
+Level 2: SKILL.md body
+  → 只在 skill 被触发时加载（~5% 的交互）
+  → 字数预算: ≤500 行
+  → 放: 执行指令 + 与其他 skill 的切换指引
+
+Level 3: references/
+  → 按需显式加载（<1% 的交互）
+  → 无字数限制
+  → 放: 详细模板、schema、完整路由地图
+```
+
+**核心规则: 永远不在 description 里放 NOT 子句、示例 query、或冗长的区分说明。这些属于 body 或 references。**
+
+#### 解决歧义的优先级
+
+```
+1. 🔴 重构消除 (最佳)  → 合并/拆分 skill，从根源上消除歧义
+2. 🟡 差异化 description → 用 ≤50 words 写出互斥的简短描述
+3. 🟢 body 内互斥指引   → 在 skill body 开头加 "如果用户意图是 X → 切换 skill Y"
+4. ❌ (禁止) description 加 NOT 子句 → 浪费全局 context
+```
+
+#### 方法 1: 重构消除 (首选)
 
 ```
 Before (歧义):
-  skill-A: description: "Code review for pull requests"
-  skill-B: description: "Security review for code changes"
+  skill-A: description: "Code review for pull requests"      (5 words)
+  skill-B: description: "Security review for code changes"   (6 words)
   → agent 看到 "review the PR" 时两个都可能触发
 
-After (互斥):
-  skill-A: description: >
-    General code review for bugs and CLAUDE.md compliance.
-    Use for: "review this PR", "code review", "check my changes".
-    Do NOT use for: security-only assessments — use security-review for that.
-  skill-B: description: >
-    Security-focused review: injection risks, auth bypass, data leaks.
-    Use for: "security review", "check for vulnerabilities", "is this safe".
-    Do NOT use for: general bug review or CLAUDE.md checks — use code-review for that.
-  → agent 看到 "check for SQL injection" 明确触发 security-review
-  → agent 看到 "review my PR for bugs" 明确触发 code-review
+After (重构 — 如果本质上差异够大就拆分更清晰):
+  skill-A: description: "Review PRs for bugs and CLAUDE.md compliance"  (9 words)
+  skill-B: description: "Security audit for injection, auth, and data leak risks" (11 words)
+  → 互斥关键词: bugs/compliance vs injection/auth/leak
+  → 都在 50 words 内，context 友好
 ```
 
-**关键技巧**: description 中加入 **NOT 子句**——明确告诉 agent 什么情况下不要触发自己。
+#### 方法 2: 差异化 description (备选)
 
-#### 方法 2: 粒度分层
-
-```
-Before (歧义):
-  skill-A: "Run tests"
-  skill-B: "Run full CI pipeline"
-
-After (分层):
-  skill-A: "Run unit tests quickly (single command, <30s)"
-  skill-B: "Run full CI pipeline (build + test + lint + deploy check, ~10min)"
-  → agent 根据用户对速度/范围的期望选择
-```
-
-#### 方法 3: 场景锚定
+如果无法重构，只在 description 中用**互斥的特征词**区分，不加 NOT 子句：
 
 ```
-Before (歧义):
-  skill-A: "Create a git commit"
-  skill-B: "Commit and create PR"
+❌ 错误示范 (NOT 子句浪费 context):
+  description: "Create a git commit when the user has staged changes.
+                Do NOT use for pushing or creating PRs — use commit-push-pr for that."
 
-After (场景锚定):
-  skill-A: "Create a git commit during active development. Use when you're mid-work and want to checkpoint."
-  skill-B: "Complete workflow: commit + push + open PR. Use when work is done and ready for review."
-  → agent 根据用户所处阶段选择
+✅ 正确示范 (只写自己的特征):
+  description: "Create a git commit for checkpointing work in progress."  (10 words)
+  → "checkpointing" — agent 能区分这 vs "done and ready for PR"
 ```
 
-#### 方法 4: 合并消除
+#### 方法 3: body 内互斥指引 (兜底)
 
-如果两个 skill 的决策边界无法建立（本质上做的是同一件事），合并为最精确的一个：
+在 skill body 开头加简洁的切换指引——只在 skill 被触发时才会加载：
+
+```markdown
+# skill body 开头
+> **Routing note**: If the user asked for a full PR workflow (commit + push + open PR),
+> suggest switching to `commit-commands:commit-push-pr` instead.
+```
+
+这 3 行只在 skill 触发时消耗 token，而不是 100% 的交互。
+
+#### 方法 4: 合并消除 (最后手段)
+
+如果两个 skill 本质上做同一件事，合并：
 
 ```
 Before: 三个 commit 相关 skill
-  commit-commands:commit
-  commit-commands:commit-push-pr
-  commit-commands:clean_gone
-
-问题: commit 和 commit-push-pr 的边界模糊
-
 After:
   commit-commands:commit          # 统一入口，自动检测阶段
-                                   # 只有暂存区有改动 → commit
-                                   # commit 已在 feature branch → commit + push + PR
   commit-commands:clean_gone      # 保持独立（操作完全不同）
 ```
 
@@ -318,24 +332,24 @@ After:  skill-a (引用 scripts/shared_s.py)
 
 ### Phase 7: 输出路由地图 — Routing Map
 
-重构完成后，生成一份**路由地图**供用户确认：
+重构完成后，生成一份**路由地图**供用户确认。注意：路由地图本身放到 references/ 或 body 中，不在 description 里展开。
 
 ```markdown
 # Skill Routing Map
 
-## 当用户说 "review" 时:
-| 用户实际意图 | 正确 Skill | 识别信号 |
-|-------------|-----------|---------|
-| 检查 bugs + 规范 | code-review | "review PR", "check bugs", "code review" |
-| 只做安全检查 | security-review | "security", "vulnerability", "safe", "injection" |
-| 全面多维度审查 | pr-review-toolkit | "comprehensive", "full review", "all aspects" |
+## "review" 类
+| Skill | description (≤50w) |
+|-------|---------------------|
+| code-review | Review PRs for bugs and CLAUDE.md compliance |
+| security-review | Security audit for injection, auth bypass, data leaks |
+| pr-review-toolkit | Comprehensive multi-agent PR review |
 
-## 当用户说 "commit" 时:
-| 用户实际意图 | 正确 Skill | 识别信号 |
-|-------------|-----------|---------|
-| 开发中存档 | commit | 只有暂存改动，没说 PR |
-| 完成工作提交 | commit-push-pr | "create PR", "push", "open a PR" |
-| 清理本地分支 | clean_gone | "clean", "stale", "gone", "cleanup" |
+## "commit" 类
+| Skill | description (≤50w) |
+|-------|---------------------|
+| commit | Create a git commit for checkpointing work in progress |
+| commit-push-pr | Complete workflow: commit, push, and open a PR |
+| clean_gone | Clean up local branches deleted on remote |
 ```
 
 #### ⏸️ STOP POINT
@@ -418,15 +432,47 @@ complex     9+         🔴 必须拆分（除非是编排型 skill 如 code-rev
 
 ## 关键原则
 
+### 第一原则：简单、必要、正确、关键
+
+Skill 中每个字必须通过四重过滤：
+
+| 过滤 | 检验 |
+|------|------|
+| **简单** | 有没有更简单的写法？去掉任何修饰词后意思变了吗？ |
+| **必要** | 删掉这句话，agent 还能正确执行吗？→ 能就删 |
+| **正确** | 这句话精确描述了行为和边界吗？没有模糊、没有歧义？ |
+| **关键** | 这句话影响 agent 的核心决策吗？还是边缘情况？边缘 → 移到 references |
+
+**违反任一过滤 → 删除或重写。**
+
+### Description 规则 (50 words 预算)
+
+description 是 100% 时间在 context 中的，必须极简：
+
+```
+✅ 好的 description:
+  "Review PRs for bugs and CLAUDE.md compliance"
+  → 9 words, 功能+场景, 互斥特征词 "bugs/compliance"
+
+❌ 坏的 description:
+  "Review pull requests for bugs, security issues, and CLAUDE.md compliance.
+   Use when the user asks for a code review, wants to check a PR, or says 'review this'.
+   Do NOT use for security-only assessments."
+  → 35 words, 包含冗余示例和 NOT 子句——浪费全局 context
+```
+
+**description 只放两样东西**: 功能 (what) + 触发时机 (when)。其他全部移到 body 或 references。
+
 ### 🎯 精准路由三原则
 
 **1. 决策边界优先**
 重构的第一目标不是「减少 skill 数量」，而是「让每个 skill 的触发条件互斥」。如果两个 skill 能建立清晰的决策边界，它们可以（也应该）独立存在。
 
-**2. Description 承载路由信息**
-- description 必须告诉 agent：**什么时候用我 + 什么时候不要用我**
-- 宁可用 NOT 子句多写 10 个字，不要让 agent 猜
-- 不要写「Help with X」——写「Use when user asks for X with Y context. Do NOT use for Z.」
+**2. Description 极简，Body 承载路由细节**
+- description ≤50 words: 功能 (what) + 触发时机 (when)
+- 互斥的特征词放在 description 中 (如 "bugs/compliance" vs "injection/auth")
+- NOT 子句、示例 query、冗长区分说明 → 放到 body（只在触发时消耗 context）
+- Body 开头放切换指引: "如果用户意图是 X → 建议 skill Y"
 
 **3. 相似的 body 可以共存，相似的 description 不行**
 两个 skill 的内部步骤相似是可以的（比如都用 git 命令），但它们的 description 必须互斥。Agent 只看 description 做路由决策。
@@ -457,12 +503,18 @@ Lean ≠ incomplete。每个 skill 必须覆盖其领域内的所有常见场景
 ### 综合原则
 
 **7. 从「我能做什么」到「用户什么情况下需要我」**
-Bad description 描述的是 skill 自身的能力。Good description 描述的是用户的场景和意图。
 
 ```
-❌ Bad:  "This skill creates git commits with auto-generated messages."
-✅ Good: "Create a git commit when the user has staged changes and wants to checkpoint.
-          Do NOT use for pushing or creating PRs — use commit-push-pr for that."
+❌ Bad:  "This skill creates git commits with auto-generated messages."  (能力描述)
+✅ Good: "Create a git commit for checkpointing work in progress."  (场景描述, 10 words)
+```
+
+**7b. 删掉它仍然正确吗？能就删**
+
+```
+Before: "Run unit tests quickly using pytest. Make sure to check all test files.
+         Execute the tests and report the results back to the user."
+After:  "Run unit tests with pytest and report results."  (9 words)
 ```
 
 **8. 精准与精简互相成就**
