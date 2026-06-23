@@ -219,3 +219,45 @@ description: Review pull requests for bugs, security issues, and CLAUDE.md compl
 |---|---|---|
 | **高使用频率** | 🔴 MERGE 优先 | 🟡 REFINE description |
 | **低使用频率** | 🟡 EXTRACT 共享部分 | 🟢 低优先级 / ARCHIVE |
+
+---
+
+## 代码重构 → Skill 重构对照表
+
+代码重构的技法和判断时机完全适用于 skill 重构：
+
+| 代码重构 | Skill 重构 | 触发信号 | 操作 |
+|----------|-----------|---------|------|
+| **Extract Method** | 提取共享步骤到 scripts/ | ≥3 个 skill 有相同的 ≥3 行指令 | 写成 `.py`/`.sh`，skill 内改为 1 行引用 |
+| **Inline Method** | 消除不必要的包装 skill | 一个 skill 只有 5 行且只是转发到另一个 skill | 删除包装 skill，直接调用目标 |
+| **Rename Variable** | 修正模糊 skill 名 | name 与功能不符 (如 `helper`、`utils`、`fix`) | 改为精确的功能名 (`security-review`、`cache-clean`) |
+| **Move Method** | 步骤在 skill 间迁移 | 一个步骤在 skill A 中但与 skill B 的功能更相关 | 移到目标 skill，原 skill 删掉该步骤 |
+| **Extract Class** | 拆分 God Skill | 一个 skill ≥6 steps 且步骤间无强顺序依赖 | 按功能边界拆为 2-3 个独立 skill |
+| **Replace Conditional with Polymorphism** | 用拆分替代 NOT 子句 | description 里出现 "If X then A else B" 或 NOT 子句 | 拆分为两个 skill，每个有互斥的 description |
+| **Remove Dead Code** | 删除死 skill | 从不被触发、引用工具已不存在、已被其他 skill 完全覆盖 | 标记 DEPRECATED → 一个版本后删除 |
+| **Rename Parameter** | 修正 description 措辞 | description 描述的触发场景与实际不符 | 重写 description 使其精确匹配实际功能 |
+
+### 重构时机判断 (Rule of Three)
+
+```
+第一次重复 → 容忍（记下来）
+第二次重复 → 关注（准备重构）
+第三次重复 → 重构（必须提取，不再等待）
+
+示例:
+  第 1 个 skill 内联了 git status 检查 → 不管
+  第 2 个 skill 也内联了 git status 检查 → 标记
+  第 3 个 skill 也内联了 → 提取到 scripts/preflight_git.py
+```
+
+### 重构安全条件
+
+```
+开始重构前检查:
+  ✅ 有备份（cp 到 ~/.claude/backups/）
+  ✅ 有功能指纹（每个原 skill 的 steps 清单）
+  ✅ 有语义等价清单（原 description 覆盖的所有场景枚举）
+
+重构不通过回滚:
+  任何一步失败 → cp 备份文件回原位 → 报告用户 → 调整方案重试
+```
